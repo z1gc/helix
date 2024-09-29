@@ -5,7 +5,7 @@ use helix_lsp::{
         self, CodeAction, CodeActionOrCommand, CodeActionTriggerKind, DiagnosticSeverity,
         NumberOrString,
     },
-    util::{diagnostic_to_lsp_diagnostic, lsp_range_to_range, range_to_lsp_range},
+    util::{diagnostic_to_lsp_diagnostic, lsp_pos_to_line, lsp_range_to_range, range_to_lsp_range},
     Client, LanguageServerId, OffsetEncoding,
 };
 use tokio_stream::StreamExt;
@@ -28,7 +28,10 @@ use helix_view::{
 use crate::{
     compositor::{self, Compositor},
     job::Callback,
-    ui::{self, overlay::overlaid, FileLocation, Picker, Popup, PromptEvent},
+    ui::{
+        self, overlay::overlaid, picker::DocumentPreviewCache, FileLocation, Picker, Popup,
+        PromptEvent,
+    },
 };
 
 use std::{
@@ -85,6 +88,7 @@ fn lsp_location_to_location(location: lsp::Location) -> Option<Location> {
 struct SymbolInformationItem {
     location: Location,
     symbol: lsp::SymbolInformation,
+    signature: Option<String>,
     offset_encoding: OffsetEncoding,
 }
 
@@ -303,17 +307,26 @@ pub fn symbol_picker(cx: &mut Context) {
         uri: &Uri,
         symbol: lsp::DocumentSymbol,
         offset_encoding: OffsetEncoding,
+        prefix: &str,
     ) {
+        // TODO: &mut String for performance? with push/pop
+        let mut name = prefix.to_string();
+        if !name.is_empty() {
+            name.push_str("::"); // cpp style
+        }
+        name.push_str(symbol.name.as_str());
+
         #[allow(deprecated)]
         list.push(SymbolInformationItem {
             symbol: lsp::SymbolInformation {
-                name: symbol.name,
+                name: name.clone(),
                 kind: symbol.kind,
                 tags: symbol.tags,
                 deprecated: symbol.deprecated,
                 location: lsp::Location::new(file.uri.clone(), symbol.selection_range),
                 container_name: None,
             },
+            signature: symbol.detail,
             offset_encoding,
             location: Location {
                 uri: uri.clone(),
@@ -321,7 +334,7 @@ pub fn symbol_picker(cx: &mut Context) {
             },
         });
         for child in symbol.children.into_iter().flatten() {
-            nested_to_flat(list, file, uri, child, offset_encoding);
+            nested_to_flat(list, file, uri, child, offset_encoding, name.as_str());
         }
     }
     let doc = doc!(cx.editor);
@@ -357,9 +370,11 @@ pub fn symbol_picker(cx: &mut Context) {
                                 range: symbol.location.range,
                             },
                             symbol,
+                            signature: None,
                             offset_encoding,
                         })
                         .collect(),
+                    // for rust-analyzer: `snap.config.hierarchical_symbols` must be enabled
                     lsp::DocumentSymbolResponse::Nested(symbols) => {
                         let mut flat_symbols = Vec::new();
                         for symbol in symbols {
@@ -369,6 +384,7 @@ pub fn symbol_picker(cx: &mut Context) {
                                 &doc_uri,
                                 symbol,
                                 offset_encoding,
+                                "",
                             )
                         }
                         flat_symbols
@@ -401,6 +417,14 @@ pub fn symbol_picker(cx: &mut Context) {
                 // URI in with the symbol name in this picker.
                 ui::PickerColumn::new("name", |item: &SymbolInformationItem, _| {
                     item.symbol.name.as_str().into()
+                }),
+                // Signature of the symbol
+                ui::PickerColumn::new("signature", |item: &SymbolInformationItem, _| {
+                    if let Some(ref signature) = item.signature {
+                        signature.to_string().into()
+                    } else {
+                        "".into()
+                    }
                 }),
             ];
 
@@ -469,6 +493,7 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
                                         range: symbol.location.range,
                                     },
                                     symbol,
+                                    signature: None,
                                     offset_encoding,
                                 })
                             })
@@ -867,23 +892,75 @@ fn goto_impl(
         }
         [] => unreachable!("`locations` should be non-empty for `goto_impl`"),
         _locations => {
-            let columns = [ui::PickerColumn::new(
-                "location",
-                |item: &Location, cwdir: &std::path::PathBuf| {
-                    let path = if let Some(path) = item.uri.as_path() {
-                        path.strip_prefix(cwdir).unwrap_or(path).to_string_lossy()
-                    } else {
-                        item.uri.to_string().into()
-                    };
+            // Manage the preview cache ourselves to speed up a little:
+            let mut preview_cache = DocumentPreviewCache::new();
 
-                    format!("{path}:{}", item.range.start.line + 1).into()
+            // [Location] -> [(Location, Line?)]
+            let locations = locations
+                .iter()
+                .map(|loc| {
+                    let line = loc.uri.as_path().and_then(|path| {
+                        let preview = preview_cache.get_preview(path, editor);
+                        let doc = preview.document()?;
+
+                        // Extract all the relative lines, we do it here for avoiding Sync:
+                        let range = lsp_pos_to_line(doc.text(), loc.range.start, offset_encoding)?;
+                        Some(doc.text().get_slice(range)?.to_string())
+                    });
+
+                    // TODO: Avoid clone?
+                    (loc.clone(), line)
+                })
+                .collect::<Vec<_>>(); // TODO: Avoid collecting, just the iterator?
+
+            // Extract symbol name from better displaying, any of it is fine:
+            let symbol_name = locations.iter().find_map(|(loc, _)| {
+                // TODO: Reuse range and line:
+                let path = loc.uri.as_path()?;
+                let preview = preview_cache.get_preview(path, editor);
+                let doc = preview.document()?;
+
+                let range = lsp_range_to_range(doc.text(), loc.range, offset_encoding)?;
+                Some(doc.text().get_slice(range.anchor..range.head)?.to_string())
+            });
+
+            let columns = [
+                ui::PickerColumn::new(
+                    symbol_name.unwrap_or_else(|| "location".to_string()),
+                    |(item, _): &(Location, Option<String>), cwdir: &std::path::PathBuf| {
+                        let path = if let Some(path) = item.uri.as_path() {
+                            path.strip_prefix(cwdir).unwrap_or(path).to_string_lossy()
+                        } else {
+                            item.uri.to_string().into()
+                        };
+
+                        format!("{path}:{}", item.range.start.line + 1).into()
+                    },
+                ),
+                ui::PickerColumn::new(
+                    "l1n3",
+                    |(_, line): &(Location, Option<String>), _: &std::path::PathBuf| {
+                        // TODO: Avoid deep copy... Seems hard:
+                        if let Some(line) = line {
+                            line.trim().into()
+                        } else {
+                            String::new().into()
+                        }
+                    },
+                ),
+            ];
+
+            let picker = Picker::new(
+                columns,
+                0,
+                locations,
+                cwdir,
+                move |cx, (location, _), action| {
+                    jump_to_location(cx.editor, location, offset_encoding, action)
                 },
-            )];
-
-            let picker = Picker::new(columns, 0, locations, cwdir, move |cx, location, action| {
-                jump_to_location(cx.editor, location, offset_encoding, action)
-            })
-            .with_preview(move |_editor, location| location_to_file_location(location));
+            )
+            .with_cached_previews(preview_cache)
+            .with_preview(move |_editor, (location, _)| location_to_file_location(location));
             compositor.push(Box::new(overlaid(picker)));
         }
     }

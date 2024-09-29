@@ -1,4 +1,6 @@
 (function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @function_name.inside)
   body: (_) @function.inside) @function.around
 
 (struct_specifier

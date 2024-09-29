@@ -19,7 +19,9 @@ use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use completion::{Completion, CompletionItem};
 pub use editor::EditorView;
+use helix_core::regex;
 use helix_stdx::rope;
+use helix_view::editor::SearchConfig;
 pub use markdown::Markdown;
 pub use menu::Menu;
 pub use picker::{Column as PickerColumn, FileLocation, Picker};
@@ -58,6 +60,32 @@ pub fn prompt_with_input(
     cx.push_layer(Box::new(prompt));
 }
 
+pub fn transform_search_query(config: &SearchConfig, query: &str) -> (String, bool) {
+    let case_insensitive = if config.case_sensitive {
+        false
+    } else if config.smart_case {
+        !query.chars().any(char::is_uppercase)
+    } else {
+        false
+    };
+
+    let input = if !config.regex {
+        regex::escape(query)
+    } else {
+        // TODO: avoid copy
+        query.to_string()
+    };
+
+    return (
+        if config.whole_word {
+            format!(r"\b{}\b", input)
+        } else {
+            input
+        },
+        case_insensitive,
+    );
+}
+
 pub fn regex_prompt(
     cx: &mut crate::commands::Context,
     prompt: std::borrow::Cow<'static, str>,
@@ -73,6 +101,7 @@ pub fn regex_prompt(
         move |cx, regex, _, event| fun(cx, regex, event),
     );
 }
+
 pub fn raw_regex_prompt(
     cx: &mut crate::commands::Context,
     prompt: std::borrow::Cow<'static, str>,
@@ -103,19 +132,14 @@ pub fn raw_regex_prompt(
                         return;
                     }
 
-                    let case_insensitive = if config.search.smart_case {
-                        !input.chars().any(char::is_uppercase)
-                    } else {
-                        false
-                    };
-
+                    let (input, case_insensitive) = transform_search_query(&config.search, input);
                     match rope::RegexBuilder::new()
                         .syntax(
                             rope::Config::new()
                                 .case_insensitive(case_insensitive)
                                 .multi_line(true),
                         )
-                        .build(input)
+                        .build(input.as_str())
                     {
                         Ok(regex) => {
                             let (view, doc) = current!(cx.editor);
@@ -128,7 +152,7 @@ pub fn raw_regex_prompt(
                                 view.jumps.push((doc_id, snapshot.clone()));
                             }
 
-                            fun(cx, regex, input, event);
+                            fun(cx, regex, input.as_str(), event);
 
                             let (view, doc) = current!(cx.editor);
                             view.ensure_cursor_in_view(doc, config.scrolloff);

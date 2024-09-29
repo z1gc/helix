@@ -326,6 +326,13 @@ impl Prompt {
         self.recalculate_completion(editor);
     }
 
+    fn kill_whole_line(&mut self, editor: &Editor) {
+        self.line = String::new();
+        self.cursor = 0;
+
+        self.recalculate_completion(editor);
+    }
+
     pub fn clear(&mut self, editor: &Editor) {
         self.line.clear();
         self.cursor = 0;
@@ -565,6 +572,10 @@ impl Component for Prompt {
             }
             ctrl!('u') => {
                 self.kill_to_start_of_line(cx.editor);
+                (self.callback_fn)(cx, &self.line, PromptEvent::Update);
+            }
+            alt!('k') => {
+                self.kill_whole_line(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update);
             }
             ctrl!('h') | key!(Backspace) | shift!(Backspace) => {

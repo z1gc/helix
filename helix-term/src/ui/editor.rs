@@ -871,7 +871,7 @@ impl EditorView {
         let mut last_mode = mode;
         self.pseudo_pending.extend(self.keymaps.pending());
         let key_result = self.keymaps.get(mode, event);
-        cxt.editor.autoinfo = self.keymaps.sticky().map(|node| node.infobox());
+        cxt.editor.autoinfo = self.keymaps.sticky().map(|node| node.infobox(&cxt.editor));
 
         let mut execute_command = |command: &commands::MappableCommand| {
             command.execute(cxt);
@@ -902,7 +902,7 @@ impl EditorView {
             KeymapResult::Matched(command) => {
                 execute_command(command);
             }
-            KeymapResult::Pending(node) => cxt.editor.autoinfo = Some(node.infobox()),
+            KeymapResult::Pending(node) => cxt.editor.autoinfo = Some(node.infobox(&cxt.editor)),
             KeymapResult::MatchedSequence(commands) => {
                 for command in commands {
                     execute_command(command);
@@ -1524,10 +1524,11 @@ impl Component for EditorView {
                 cx.editor.theme.get("ui.text")
             };
 
-            surface.set_string(
+            surface.set_stringn(
                 area.x,
                 area.y + area.height.saturating_sub(1),
                 status_msg,
+                area.width as usize,
                 style,
             );
         }

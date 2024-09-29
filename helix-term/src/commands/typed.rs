@@ -332,12 +332,14 @@ fn write_impl(
     cx: &mut compositor::Context,
     path: Option<&Cow<str>>,
     force: bool,
+    format: bool,
 ) -> anyhow::Result<()> {
     let config = cx.editor.config();
     let jobs = &mut cx.jobs;
     let (view, doc) = current!(cx.editor);
     let path = path.map(AsRef::as_ref);
 
+    // TODO: don't insert the newline if the user deleted it...
     if config.insert_final_newline {
         insert_final_newline(doc, view.id);
     }
@@ -345,8 +347,16 @@ fn write_impl(
     // Save an undo checkpoint for any outstanding changes.
     doc.append_changes_to_history(view);
 
-    let fmt = if config.auto_format {
-        doc.auto_format().map(|fmt| {
+    let fmt = if format {
+        doc.format()
+    } else if config.auto_format {
+        doc.auto_format()
+    } else {
+        None
+    };
+
+    if let Some(fmt) = fmt {
+        if true {
             let callback = make_format_callback(
                 doc.id(),
                 doc.version(),
@@ -356,12 +366,8 @@ fn write_impl(
             );
 
             jobs.add(Job::with_callback(callback).wait_before_exiting());
-        })
+        }
     } else {
-        None
-    };
-
-    if fmt.is_none() {
         let id = doc.id();
         cx.editor.save(id, path, force)?;
     }
@@ -387,7 +393,7 @@ fn write(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), false)
+    write_impl(cx, args.first(), false, false)
 }
 
 fn force_write(
@@ -399,7 +405,7 @@ fn force_write(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), true)
+    write_impl(cx, args.first(), true, false)
 }
 
 fn write_buffer_close(
@@ -411,7 +417,7 @@ fn write_buffer_close(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), false)?;
+    write_impl(cx, args.first(), false, false)?;
 
     let document_ids = buffer_gather_paths_impl(cx.editor, args);
     buffer_close_by_ids_impl(cx, &document_ids, false)
@@ -426,7 +432,7 @@ fn force_write_buffer_close(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), true)?;
+    write_impl(cx, args.first(), true, false)?;
 
     let document_ids = buffer_gather_paths_impl(cx.editor, args);
     buffer_close_by_ids_impl(cx, &document_ids, false)
@@ -463,6 +469,31 @@ fn format(
 
     Ok(())
 }
+
+fn format_write(
+    cx: &mut compositor::Context,
+    args: &[Cow<str>],
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    write_impl(cx, args.first(), false, true)
+}
+
+fn format_write_force(
+    cx: &mut compositor::Context,
+    args: &[Cow<str>],
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    write_impl(cx, args.first(), true, true)
+}
+
 fn set_indent_style(
     cx: &mut compositor::Context,
     args: &[Cow<str>],
@@ -625,7 +656,7 @@ fn write_quit(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), false)?;
+    write_impl(cx, args.first(), false, false)?;
     cx.block_try_flush_writes()?;
     quit(cx, &[], event)
 }
@@ -639,7 +670,7 @@ fn force_write_quit(
         return Ok(());
     }
 
-    write_impl(cx, args.first(), true)?;
+    write_impl(cx, args.first(), true, false)?;
     cx.block_try_flush_writes()?;
     force_quit(cx, &[], event)
 }
@@ -1713,6 +1744,29 @@ fn hsplit_new(
     Ok(())
 }
 
+fn focus(
+    cx: &mut compositor::Context,
+    args: &[Cow<str>],
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    ensure!(!args.is_empty(), "Window number is required");
+    let num: usize = args.first().unwrap().parse()?;
+    let view = cx.editor.tree.views_sorted_by_position().nth(num - 1);
+
+    if let Some(view) = view {
+        cx.editor.focus(view.id)
+    } else {
+        cx.editor
+            .set_error(format!("Window {} doesn't exist!", num))
+    }
+
+    Ok(())
+}
+
 fn debug_eval(
     cx: &mut compositor::Context,
     args: &[Cow<str>],
@@ -2641,6 +2695,20 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         signature: CommandSignature::none(),
     },
     TypableCommand {
+        name: "format-write",
+        aliases: &["m"],
+        doc: "Format the document, then write.",
+        fun: format_write,
+        signature: CommandSignature::none(),
+    },
+    TypableCommand {
+        name: "format-write!",
+        aliases: &["m!"],
+        doc: "Format the document, then write forcibily.",
+        fun: format_write_force,
+        signature: CommandSignature::none(),
+    },
+    TypableCommand {
         name: "indent-style",
         aliases: &[],
         doc: "Set the indentation style for editing. ('t' for tabs or 1-16 for number of spaces.)",
@@ -2963,6 +3031,13 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &["hnew"],
         doc: "Open a scratch buffer in a horizontal split.",
         fun: hsplit_new,
+        signature: CommandSignature::none(),
+    },
+    TypableCommand {
+        name: "focus",
+        aliases: &[],
+        doc: "Focus a window by number.",
+        fun: focus,
         signature: CommandSignature::none(),
     },
     TypableCommand {
