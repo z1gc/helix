@@ -513,6 +513,12 @@ impl Selection {
         }
     }
 
+    pub fn is_single_grapheme(&self, text: RopeSlice) -> bool {
+        self.ranges()
+            .get(0)
+            .is_some_and(|r| r.is_single_grapheme(text))
+    }
+
     pub fn primary_index(&self) -> usize {
         self.primary_index
     }

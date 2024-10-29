@@ -1,4 +1,4 @@
-use std::str::from_utf8;
+use std::{path::PathBuf, str::from_utf8};
 
 /// Default built-in languages.toml.
 pub fn default_lang_config() -> toml::Value {
@@ -10,6 +10,7 @@ pub fn default_lang_config() -> toml::Value {
 /// User configured languages.toml file, merged with the default config.
 pub fn user_lang_config() -> Result<toml::Value, toml::de::Error> {
     let config = [
+        PathBuf::from("/etc/helix"),
         crate::config_dir(),
         crate::find_workspace().0.join(".helix"),
     ]

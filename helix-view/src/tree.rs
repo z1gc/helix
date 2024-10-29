@@ -1,3 +1,5 @@
+use std::{cmp::Ordering, collections::BinaryHeap, convert::identity, iter};
+
 use crate::{graphics::Rect, View, ViewId};
 use slotmap::HopSlotMap;
 
@@ -278,6 +280,38 @@ impl Tree {
             } => Some((view.as_ref(), focus == key)),
             _ => None,
         })
+    }
+
+    // TODO: generic `sorted_by`
+    pub fn views_sorted_by_position(&self) -> impl Iterator<Item = &View> {
+        impl Eq for View {}
+
+        impl PartialEq for View {
+            fn eq(&self, other: &Self) -> bool {
+                self.area.x == other.area.x && self.area.y == other.area.y
+            }
+        }
+
+        // The binary heap is reversed...
+        impl Ord for View {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other
+                    .area
+                    .x
+                    .cmp(&self.area.x)
+                    .then_with(|| other.area.y.cmp(&self.area.y))
+            }
+        }
+
+        impl PartialOrd for View {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        // TODO: the `into_iter_sorted` of BinaryHeap is unstable...
+        let mut heap = self.views().map(|(v, _)| v).collect::<BinaryHeap<_>>();
+        iter::repeat_with(move || heap.pop()).map_while(identity)
     }
 
     pub fn views_mut(&mut self) -> impl Iterator<Item = (&mut View, bool)> {

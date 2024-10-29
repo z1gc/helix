@@ -139,6 +139,7 @@ where
 {
     match element_id {
         helix_view::editor::StatusLineElement::Mode => render_mode,
+        helix_view::editor::StatusLineElement::Window => render_window_number,
         helix_view::editor::StatusLineElement::Spinner => render_lsp_spinner,
         helix_view::editor::StatusLineElement::FileBaseName => render_file_base_name,
         helix_view::editor::StatusLineElement::FileName => render_file_name,
@@ -163,6 +164,7 @@ where
         helix_view::editor::StatusLineElement::Spacer => render_spacer,
         helix_view::editor::StatusLineElement::VersionControl => render_version_control,
         helix_view::editor::StatusLineElement::Register => render_register,
+        helix_view::editor::StatusLineElement::SearchConfig => render_search_config,
     }
 }
 
@@ -197,6 +199,27 @@ where
         } else {
             None
         },
+    );
+}
+
+fn render_window_number<F>(context: &mut RenderContext, write: F)
+where
+    F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+{
+    context.view.id;
+    let id = 1 + context
+        .editor
+        .tree
+        .views_sorted_by_position()
+        .enumerate()
+        .find(|(_, v)| v.id == context.view.id)
+        .unwrap()
+        .0;
+    // little bit *colorful*
+    write(
+        context,
+        format!(" {{{} ", id),
+        Some(context.editor.theme.get("magenta")),
     );
 }
 
@@ -530,4 +553,23 @@ where
     if let Some(reg) = context.editor.selected_register {
         write(context, format!(" reg={} ", reg), None)
     }
+}
+
+fn render_search_config<F>(context: &mut RenderContext, write: F)
+where
+    F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+{
+    // TODO: place to ui/editor.rs using `status_msg`?
+    let sc = &context.editor.config().search;
+    write(
+        context,
+        format!(
+            " ({}{}{}{}) ",
+            if sc.regex { 'r' } else { ' ' },
+            if sc.case_sensitive { 'c' } else { ' ' },
+            if sc.smart_case { 's' } else { ' ' },
+            if sc.whole_word { 'w' } else { ' ' }
+        ),
+        None,
+    )
 }

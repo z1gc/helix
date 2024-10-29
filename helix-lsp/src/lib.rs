@@ -126,21 +126,18 @@ pub mod util {
         }
     }
 
-    /// Converts [`lsp::Position`] to a position in the document.
-    ///
-    /// Returns `None` if position.line is out of bounds or an overflow occurs
-    pub fn lsp_pos_to_pos(
+    pub fn lsp_pos_to_line(
         doc: &Rope,
         pos: lsp::Position,
         offset_encoding: OffsetEncoding,
-    ) -> Option<usize> {
+    ) -> Option<std::ops::Range<usize>> {
         let pos_line = pos.line as usize;
         if pos_line > doc.len_lines() - 1 {
             // If it extends past the end, truncate it to the end. This is because the
             // way the LSP describes the range including the last newline is by
             // specifying a line number after what we would call the last line.
             log::warn!("LSP position {pos:?} out of range assuming EOF");
-            return Some(doc.len_chars());
+            return None;
         }
 
         // We need to be careful here to fully comply ith the LSP spec.
@@ -187,6 +184,22 @@ pub mod util {
                 let line_end = line_end_char_index(&doc.slice(..), pos_line);
                 line_start..line_end
             }
+        };
+
+        Some(line)
+    }
+
+    /// Converts [`lsp::Position`] to a position in the document.
+    ///
+    /// Returns `None` if position.line is out of bounds or an overflow occurs
+    pub fn lsp_pos_to_pos(
+        doc: &Rope,
+        pos: lsp::Position,
+        offset_encoding: OffsetEncoding,
+    ) -> Option<usize> {
+        let line = match lsp_pos_to_line(doc, pos, offset_encoding) {
+            Some(line) => line,
+            None => return Some(doc.len_chars()),
         };
 
         // The LSP spec demands that the offset is capped to the end of the line
