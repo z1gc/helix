@@ -1,4 +1,5 @@
 (function_item
+  name: (_) @function_name.inside
   body: (_) @function.inside) @function.around
 
 (closure_expression

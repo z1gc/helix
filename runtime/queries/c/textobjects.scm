@@ -1,3 +1,6 @@
+(function_declarator
+  declarator: (identifier) @function_name.inside)
+
 (function_definition
   body: (_) @function.inside) @function.around
 

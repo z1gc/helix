@@ -98,7 +98,7 @@ pub enum Preview<'picker, 'editor> {
 }
 
 impl Preview<'_, '_> {
-    fn document(&self) -> Option<&Document> {
+    pub fn document(&self) -> Option<&Document> {
         match self {
             Preview::EditorDocument(doc) => Some(doc),
             Preview::Cached(CachedPreview::Document(doc)) => Some(doc),
@@ -175,11 +175,10 @@ impl<T, D> Injector<T, D> {
     }
 }
 
-type ColumnFormatFn<T, D> = for<'a> fn(&'a T, &'a D) -> Cell<'a>;
-
 pub struct Column<T, D> {
     name: Arc<str>,
-    format: ColumnFormatFn<T, D>,
+    /// Accept a closure, trading some performance against customization:
+    format: Arc<dyn for<'a> Fn(&'a T, &'a D) -> Cell<'a> + Send + Sync>,
     /// Whether the column should be passed to nucleo for matching and filtering.
     /// `DynamicPicker` uses this so that the dynamic column (for example regex in
     /// global search) is not used for filtering twice.
@@ -188,10 +187,14 @@ pub struct Column<T, D> {
 }
 
 impl<T, D> Column<T, D> {
-    pub fn new(name: impl Into<Arc<str>>, format: ColumnFormatFn<T, D>) -> Self {
+    pub fn new<F>(name: impl Into<Arc<str>>, format: F) -> Self
+    where
+        F: for<'a> Fn(&'a T, &'a D) -> Cell<'a> + Send + Sync,
+        F: 'static,
+    {
         Self {
             name: name.into(),
-            format,
+            format: Arc::new(format),
             filter: true,
             hidden: false,
         }
@@ -199,11 +202,9 @@ impl<T, D> Column<T, D> {
 
     /// A column which does not display any contents
     pub fn hidden(name: impl Into<Arc<str>>) -> Self {
-        let format = |_: &T, _: &D| unreachable!();
-
         Self {
             name: name.into(),
-            format,
+            format: Arc::new(|_: &T, _: &D| unreachable!()),
             filter: false,
             hidden: true,
         }
@@ -221,6 +222,74 @@ impl<T, D> Column<T, D> {
     fn format_text<'a>(&self, item: &'a T, data: &'a D) -> Cow<'a, str> {
         let text: String = self.format(item, data).content.into();
         text.into()
+    }
+}
+
+const CACHE_READ_AHEAD_SIZE: usize = 1024;
+
+pub struct DocumentPreviewCache {
+    /// Caches paths to documents
+    preview_cache: HashMap<Arc<Path>, CachedPreview>,
+    read_buffer: Vec<u8>,
+}
+
+impl DocumentPreviewCache {
+    pub fn new() -> Self {
+        Self {
+            preview_cache: HashMap::new(),
+            read_buffer: Vec::with_capacity(CACHE_READ_AHEAD_SIZE),
+        }
+    }
+
+    /// Get (cached) preview for the currently selected item. If a document corresponding
+    /// to the path is already open in the editor, it is used instead.
+    pub fn get_preview<'picker, 'editor>(
+        &'picker mut self,
+        path: &Path,
+        editor: &'editor Editor,
+    ) -> Preview<'picker, 'editor> {
+        if let Some(doc) = editor.document_by_path(path) {
+            return Preview::EditorDocument(doc);
+        }
+
+        // TODO: Performance?
+        let path: Arc<Path> = path.into();
+        if self.preview_cache.contains_key(&path) {
+            let preview = &self.preview_cache[&path];
+            return Preview::Cached(preview);
+        }
+
+        let data = std::fs::File::open(&path).and_then(|file| {
+            let metadata = file.metadata()?;
+            // Read up to 1kb to detect the content type
+            let n = file.take(1024).read_to_end(&mut self.read_buffer)?;
+            let content_type = content_inspector::inspect(&self.read_buffer[..n]);
+            self.read_buffer.clear();
+            Ok((metadata, content_type))
+        });
+
+        let preview = data
+            .map(
+                |(metadata, content_type)| match (metadata.len(), content_type) {
+                    (_, content_inspector::ContentType::BINARY) => CachedPreview::Binary,
+                    (size, _) if size > MAX_FILE_SIZE_FOR_PREVIEW => CachedPreview::LargeFile,
+                    _ => Document::open(&path, None, None, editor.config.clone())
+                        .map(|doc| CachedPreview::Document(Box::new(doc)))
+                        .unwrap_or(CachedPreview::NotFound),
+                },
+            )
+            .unwrap_or(CachedPreview::NotFound);
+
+        self.preview_cache.insert(path.clone(), preview);
+        Preview::Cached(&self.preview_cache[&path])
+    }
+
+    pub fn get_mut(&mut self, path: &Arc<Path>) -> Option<&mut CachedPreview> {
+        self.preview_cache.get_mut(path)
+    }
+
+    pub fn next(&self) -> Option<&CachedPreview> {
+        self.preview_cache.values().next()
     }
 }
 
@@ -251,9 +320,7 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     callback_fn: PickerCallback<T>,
 
     pub truncate_start: bool,
-    /// Caches paths to documents
-    preview_cache: HashMap<Arc<Path>, CachedPreview>,
-    read_buffer: Vec<u8>,
+    preview_cache: DocumentPreviewCache,
     /// Given an item in the picker, return the file path and line number to display.
     file_fn: Option<FileCallback<T>>,
     /// An event handler for syntax highlighting the currently previewed file.
@@ -356,7 +423,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
         let widths = columns
             .iter()
-            .map(|column| Constraint::Length(column.name.chars().count() as u16))
+            .map(|column| Constraint::Length(column.name.chars().count() as u16 + 1u16))
             .collect();
 
         let query = PickerQuery::new(columns.iter().map(|col| &col.name).cloned(), default_column);
@@ -375,8 +442,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             callback_fn: Box::new(callback_fn),
             completion_height: 0,
             widths,
-            preview_cache: HashMap::new(),
-            read_buffer: Vec::with_capacity(1024),
+            preview_cache: DocumentPreviewCache::new(),
             file_fn: None,
             preview_highlight_handler: PreviewHighlightHandler::<T, D>::default().spawn(),
             dynamic_query_handler: None,
@@ -410,8 +476,28 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         self
     }
 
-    pub fn with_history_register(mut self, history_register: Option<char>) -> Self {
+    pub fn with_cached_previews(mut self, preview_cache: DocumentPreviewCache) -> Self {
+        self.preview_cache = preview_cache;
+        self
+    }
+
+    pub fn with_history_register(
+        mut self,
+        history_register: Option<char>,
+        editor: &Editor,
+    ) -> Self {
         self.prompt.with_history_register(history_register);
+
+        // If the prompt has a history completion and is empty, accept it now
+        if let Some(completion) = self
+            .prompt
+            .first_history_completion(editor)
+            .filter(|_| self.prompt.line().is_empty())
+        {
+            self.prompt.set_line(completion.to_string(), editor);
+            self.handle_prompt_change(true);
+        }
+
         self
     }
 
@@ -565,61 +651,29 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         let current = self.selection()?;
         let (path_or_id, range) = (self.file_fn.as_ref()?)(editor, current)?;
 
-        match path_or_id {
+        let preview = match path_or_id {
             PathOrId::Path(path) => {
-                if let Some(doc) = editor.document_by_path(path) {
-                    return Some((Preview::EditorDocument(doc), range));
-                }
-
-                if self.preview_cache.contains_key(path) {
-                    // NOTE: we use `HashMap::get_key_value` here instead of indexing so we can
-                    // retrieve the `Arc<Path>` key. The `path` in scope here is a `&Path` and
-                    // we can cheaply clone the key for the preview highlight handler.
-                    let (path, preview) = self.preview_cache.get_key_value(path).unwrap();
-                    if matches!(preview, CachedPreview::Document(doc) if doc.language_config().is_none())
-                    {
-                        helix_event::send_blocking(&self.preview_highlight_handler, path.clone());
-                    }
-                    return Some((Preview::Cached(preview), range));
-                }
-
-                let path: Arc<Path> = path.into();
-                let data = std::fs::File::open(&path).and_then(|file| {
-                    let metadata = file.metadata()?;
-                    // Read up to 1kb to detect the content type
-                    let n = file.take(1024).read_to_end(&mut self.read_buffer)?;
-                    let content_type = content_inspector::inspect(&self.read_buffer[..n]);
-                    self.read_buffer.clear();
-                    Ok((metadata, content_type))
-                });
-                let preview = data
-                    .map(
-                        |(metadata, content_type)| match (metadata.len(), content_type) {
-                            (_, content_inspector::ContentType::BINARY) => CachedPreview::Binary,
-                            (size, _) if size > MAX_FILE_SIZE_FOR_PREVIEW => {
-                                CachedPreview::LargeFile
-                            }
-                            _ => Document::open(&path, None, None, editor.config.clone())
-                                .map(|doc| {
-                                    // Asynchronously highlight the new document
-                                    helix_event::send_blocking(
-                                        &self.preview_highlight_handler,
-                                        path.clone(),
-                                    );
-                                    CachedPreview::Document(Box::new(doc))
-                                })
-                                .unwrap_or(CachedPreview::NotFound),
-                        },
-                    )
-                    .unwrap_or(CachedPreview::NotFound);
-                self.preview_cache.insert(path.clone(), preview);
-                Some((Preview::Cached(&self.preview_cache[&path]), range))
+                // TODO: avoid deeply copied 'to_owned'?
+                let path = path.to_owned();
+                self.preview_cache.get_preview(path.as_path(), editor)
             }
             PathOrId::Id(id) => {
                 let doc = editor.documents.get(&id).unwrap();
-                Some((Preview::EditorDocument(doc), range))
+                Preview::EditorDocument(doc)
+            }
+        };
+
+        if let Preview::Cached(CachedPreview::Document(doc)) = preview {
+            // TODO: Simplify?
+            if doc.language_config().is_none() {
+                helix_event::send_blocking(
+                    &self.preview_highlight_handler,
+                    doc.path().unwrap().clone().into(),
+                );
             }
         }
+
+        Some((preview, range))
     }
 
     fn render_picker(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
@@ -780,8 +834,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             .column_spacing(1)
             .widths(&self.widths);
 
-        // -- Header
-        if self.columns.len() > 1 {
+        // -- Header, always show; with `if true` to keep indent for git diff
+        if true {
             let active_column = self.query.active_column(self.prompt.position());
             let header_style = cx.editor.theme.get("ui.picker.header");
             let header_column_style = cx.editor.theme.get("ui.picker.header.column");
@@ -798,7 +852,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                                 header_column_style
                             };
 
-                        Cell::from(Span::styled(Cow::from(&*column.name), style))
+                        // Add a prefix % to indicate you can filter with it
+                        let name = format!("%{}", &*column.name);
+                        Cell::from(Span::styled(Cow::from(name), style))
                     }
                 }))
                 .style(header_style),
@@ -1018,17 +1074,7 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
                 }
             }
             key!(Enter) => {
-                // If the prompt has a history completion and is empty, use enter to accept
-                // that completion
-                if let Some(completion) = self
-                    .prompt
-                    .first_history_completion(ctx.editor)
-                    .filter(|_| self.prompt.line().is_empty())
-                {
-                    self.prompt.set_line(completion.to_string(), ctx.editor);
-                    // Inserting from the history register is a paste.
-                    self.handle_prompt_change(true);
-                } else {
+                if true {
                     if let Some(option) = self.selection() {
                         (self.callback_fn)(ctx, option, Action::Replace);
                     }

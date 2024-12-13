@@ -17,7 +17,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "F" => find_prev_char,
         "r" => replace,
         "R" => replace_with_yanked,
-        "A-." =>  repeat_last_motion,
+        // "." => repeat_last_insert is defined in @see command_mode
+        "A-." => repeat_last_motion,
 
         "~" => switch_case,
         "`" => switch_to_lowercase,
@@ -77,7 +78,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "C" => copy_selection_on_next_line,
         "A-C" => copy_selection_on_prev_line,
 
-
         "s" => select_regex,
         "A-s" => split_selection_on_newline,
         "A-minus" => merge_selections,
@@ -113,6 +113,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "g" => goto_prev_change,
             "G" => goto_first_change,
             "f" => goto_prev_function,
+            "n" => goto_prev_function_name,
             "t" => goto_prev_class,
             "a" => goto_prev_parameter,
             "c" => goto_prev_comment,
@@ -127,6 +128,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "g" => goto_next_change,
             "G" => goto_last_change,
             "f" => goto_next_function,
+            "n" => goto_next_function_name,
             "t" => goto_next_class,
             "a" => goto_next_parameter,
             "c" => goto_next_comment,

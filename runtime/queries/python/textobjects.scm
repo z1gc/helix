@@ -1,4 +1,5 @@
 (function_definition
+  name: (identifier) @function_name.inside
   body: (block)? @function.inside) @function.around
 
 (class_definition

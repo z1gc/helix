@@ -59,7 +59,10 @@ use crate::{
     compositor::{self, Component, Compositor},
     filter_picker_entry,
     job::Callback,
-    ui::{self, overlay::overlaid, Picker, PickerColumn, Popup, Prompt, PromptEvent},
+    ui::{
+        self, overlay::overlaid, transform_search_query, Picker, PickerColumn, Popup, Prompt,
+        PromptEvent,
+    },
 };
 
 use crate::job::{self, Jobs};
@@ -452,6 +455,7 @@ impl MappableCommand {
         signature_help, "Show signature help",
         smart_tab, "Insert tab if all cursors have all whitespace to their left; otherwise, run a separate command.",
         insert_tab, "Insert tab char",
+        insert_raw_tab, "Insert the real tab char",
         insert_newline, "Insert newline char",
         delete_char_backward, "Delete previous char",
         delete_char_forward, "Delete next char",
@@ -543,6 +547,8 @@ impl MappableCommand {
         select_textobject_inner, "Select inside object",
         goto_next_function, "Goto next function",
         goto_prev_function, "Goto previous function",
+        goto_next_function_name, "Goto next function name",
+        goto_prev_function_name, "Goto previous function name",
         goto_next_class, "Goto next type definition",
         goto_prev_class, "Goto previous type definition",
         goto_next_parameter, "Goto next parameter",
@@ -587,6 +593,8 @@ impl MappableCommand {
         extend_to_word, "Extend to a two-character label",
         goto_next_tabstop, "goto next snippet placeholder",
         goto_prev_tabstop, "goto next snippet placeholder",
+        goto_word_definition, "Definition of a two-character label",
+        goto_word_reference, "Reference of a two-character label",
     );
 }
 
@@ -1175,7 +1183,16 @@ fn move_prev_word_end(cx: &mut Context) {
 }
 
 fn move_next_word_end(cx: &mut Context) {
-    move_word_impl(cx, movement::move_next_word_end)
+    // https://github.com/helix-editor/helix/discussions/10266
+    // FIXME: Boundary issue? Workaround currently:
+    let mode = cx.editor.mode;
+    move_word_impl(cx, |text, range, count| {
+        let mut selection = movement::move_next_word_end(text, range, count);
+        if mode == Mode::Insert {
+            selection.head += 1
+        }
+        selection
+    })
 }
 
 fn move_next_long_word_start(cx: &mut Context) {
@@ -2214,11 +2231,8 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
     let scrolloff = config.scrolloff;
     if let Some(query) = cx.editor.registers.first(register, cx.editor) {
         let search_config = &config.search;
-        let case_insensitive = if search_config.smart_case {
-            !query.chars().any(char::is_uppercase)
-        } else {
-            false
-        };
+        let (query, case_insensitive) = transform_search_query(search_config, query.as_ref());
+
         let wrap_around = search_config.wrap_around;
         if let Ok(regex) = rope::RegexBuilder::new()
             .syntax(
@@ -2270,6 +2284,10 @@ fn search_selection_detect_word_boundaries(cx: &mut Context) {
 }
 
 fn search_selection_impl(cx: &mut Context, detect_word_boundaries: bool) {
+    if cx.count.is_none() {
+        do_expand_selection(cx.editor, true);
+    }
+
     fn is_at_word_start(text: RopeSlice, index: usize) -> bool {
         let ch = text.char(index);
         if index == 0 {
@@ -2382,13 +2400,14 @@ fn global_search(cx: &mut Context) {
     }
 
     struct GlobalSearchConfig {
-        smart_case: bool,
+        search_config: helix_view::editor::SearchConfig,
         file_picker_config: helix_view::editor::FilePickerConfig,
     }
 
+    // TODO: try to avoid copy with Rc or else?
     let config = cx.editor.config();
     let config = GlobalSearchConfig {
-        smart_case: config.search.smart_case,
+        search_config: config.search.clone(),
         file_picker_config: config.file_picker.clone(),
     };
 
@@ -2419,9 +2438,11 @@ fn global_search(cx: &mut Context) {
             .map(|doc| (doc.path().cloned(), doc.text().to_owned()))
             .collect();
 
+        // TODO: better smart-case?
+        let (query, case_insensitive) = transform_search_query(&config.search_config, query);
         let matcher = match RegexMatcherBuilder::new()
-            .case_smart(config.smart_case)
-            .build(query)
+            .case_insensitive(case_insensitive)
+            .build(query.as_ref())
         {
             Ok(matcher) => {
                 // Clear any "Failed to compile regex" errors out of the statusline.
@@ -2564,7 +2585,7 @@ fn global_search(cx: &mut Context) {
     .with_preview(|_editor, FileResult { path, line_num, .. }| {
         Some((path.as_path().into(), Some((*line_num, *line_num))))
     })
-    .with_history_register(Some(reg))
+    .with_history_register(Some(reg), cx.editor)
     .with_dynamic_query(get_files, Some(275));
 
     cx.push_layer(Box::new(overlaid(picker)));
@@ -2959,11 +2980,7 @@ fn file_picker(cx: &mut Context) {
 }
 
 fn file_picker_in_current_buffer_directory(cx: &mut Context) {
-    let doc_dir = doc!(cx.editor)
-        .path()
-        .and_then(|path| path.parent().map(|path| path.to_path_buf()));
-
-    let path = match doc_dir {
+    let path = match cx.editor.current_buffer_directory() {
         Some(path) => path,
         None => {
             cx.editor.set_error("current buffer has no path or parent");
@@ -3972,6 +3989,18 @@ pub mod insert {
             doc.text(),
             &doc.selection(view.id).clone().cursors(doc.text().slice(..)),
             indent,
+        );
+        doc.apply(&transaction, view.id);
+    }
+
+    pub fn insert_raw_tab(cx: &mut Context) {
+        let (view, doc) = current!(cx.editor);
+
+        // Force to be a real tab:
+        let transaction = Transaction::insert(
+            doc.text(),
+            &doc.selection(view.id).clone().cursors(doc.text().slice(..)),
+            Tendril::from("\t"),
         );
         doc.apply(&transaction, view.id);
     }
@@ -5114,14 +5143,18 @@ fn reverse_selection_contents(cx: &mut Context) {
 
 // tree sitter node selection
 
-fn expand_selection(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
+fn do_expand_selection(editor: &mut Editor, skip_if_selected: bool) {
+    if true {
         let (view, doc) = current!(editor);
 
         if let Some(syntax) = doc.syntax() {
             let text = doc.text().slice(..);
 
             let current_selection = doc.selection(view.id);
+            if skip_if_selected && !current_selection.is_single_grapheme(text) {
+                return;
+            }
+
             let selection = object::expand_selection(syntax, text, current_selection.clone());
 
             // check if selection is different from the last one
@@ -5133,7 +5166,11 @@ fn expand_selection(cx: &mut Context) {
             }
         }
     };
-    cx.editor.apply_motion(motion);
+}
+
+fn expand_selection(cx: &mut Context) {
+    cx.editor
+        .apply_motion(|editor: &mut Editor| do_expand_selection(editor, false));
 }
 
 fn shrink_selection(cx: &mut Context) {
@@ -5554,6 +5591,14 @@ fn goto_next_function(cx: &mut Context) {
 
 fn goto_prev_function(cx: &mut Context) {
     goto_ts_object_impl(cx, "function", Direction::Backward)
+}
+
+fn goto_next_function_name(cx: &mut Context) {
+    goto_ts_object_impl(cx, "function_name", Direction::Forward)
+}
+
+fn goto_prev_function_name(cx: &mut Context) {
+    goto_ts_object_impl(cx, "function_name", Direction::Backward)
 }
 
 fn goto_next_class(cx: &mut Context) {
@@ -6334,14 +6379,27 @@ fn replay_macro(cx: &mut Context) {
 }
 
 fn goto_word(cx: &mut Context) {
-    jump_to_word(cx, Movement::Move)
+    jump_to_word(cx, Movement::Move, None)
 }
 
 fn extend_to_word(cx: &mut Context) {
-    jump_to_word(cx, Movement::Extend)
+    jump_to_word(cx, Movement::Extend, None)
 }
 
-fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
+fn goto_word_reference(cx: &mut Context) {
+    jump_to_word(cx, Movement::Move, Some(goto_reference))
+}
+
+fn goto_word_definition(cx: &mut Context) {
+    jump_to_word(cx, Movement::Move, Some(goto_definition))
+}
+
+fn jump_to_label(
+    cx: &mut Context,
+    labels: Vec<Range>,
+    behaviour: Movement,
+    do_next: Option<fn(&mut Context)>,
+) {
     let doc = doc!(cx.editor);
     let alphabet = &cx.editor.config().jump_label_alphabet;
     if labels.is_empty() {
@@ -6420,15 +6478,23 @@ fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
                     };
                     Range::new(anchor, range.head)
                 } else {
+                    // Movement, save to jumplist before we jump
+                    let (view, doc) = current!(cx.editor);
+                    push_jump(view, doc);
+
                     range.with_direction(Direction::Forward)
                 };
                 doc_mut!(cx.editor, &doc).set_selection(view, range.into());
+
+                if let Some(func) = do_next {
+                    func(cx);
+                }
             }
         });
     });
 }
 
-fn jump_to_word(cx: &mut Context, behaviour: Movement) {
+fn jump_to_word(cx: &mut Context, behaviour: Movement, do_next: Option<fn(&mut Context)>) {
     // Calculate the jump candidates: ranges for any visible words with two or
     // more characters.
     let alphabet = &cx.editor.config().jump_label_alphabet;
@@ -6515,5 +6581,5 @@ fn jump_to_word(cx: &mut Context, behaviour: Movement) {
             break;
         }
     }
-    jump_to_label(cx, words, behaviour)
+    jump_to_label(cx, words, behaviour, do_next)
 }

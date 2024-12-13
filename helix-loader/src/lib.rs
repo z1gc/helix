@@ -16,6 +16,10 @@ static CONFIG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCe
 static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
 
 pub fn initialize_config_file(specified_file: Option<PathBuf>) {
+    // Order:
+    // 1. Argument config file,
+    // 2. Global config file in /etc/helix,
+    // 3. Local config file.
     let config_file = specified_file.unwrap_or_else(default_config_file);
     ensure_parent_dir(&config_file);
     CONFIG_FILE.set(config_file).ok();
@@ -145,7 +149,12 @@ pub fn workspace_config_file() -> PathBuf {
 }
 
 pub fn lang_config_file() -> PathBuf {
-    config_dir().join("languages.toml")
+    let system_config = PathBuf::from("/etc/helix/languages.toml");
+    if system_config.exists() {
+        system_config
+    } else {
+        config_dir().join("languages.toml")
+    }
 }
 
 pub fn default_log_file() -> PathBuf {
@@ -244,7 +253,12 @@ pub fn find_workspace() -> (PathBuf, bool) {
 }
 
 fn default_config_file() -> PathBuf {
-    config_dir().join("config.toml")
+    let system_config = PathBuf::from("/etc/helix/config.toml");
+    if system_config.exists() {
+        system_config
+    } else {
+        config_dir().join("config.toml")
+    }
 }
 
 fn ensure_parent_dir(path: &Path) {
