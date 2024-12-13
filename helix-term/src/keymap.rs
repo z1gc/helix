@@ -72,18 +72,31 @@ impl KeyTrieNode {
         }
     }
 
-    pub fn infobox(&self) -> Info {
-        let mut body: Vec<(BTreeSet<KeyEvent>, &str)> = Vec::with_capacity(self.len());
+    pub fn infobox(&self, editor: &helix_view::Editor) -> Info {
+        let mut body: Vec<(BTreeSet<KeyEvent>, String)> = Vec::with_capacity(self.len());
         for (&key, trie) in self.iter() {
             let desc = match trie {
                 KeyTrie::MappableCommand(cmd) => {
                     if cmd.name() == "no_op" {
                         continue;
                     }
-                    cmd.doc()
+
+                    // Special handling for ":toggle_option", we show the current value as well.
+                    // TODO: more generic approach, to make other mappable/typable commands work.
+                    match cmd {
+                        MappableCommand::Typable { name, args, .. } if name == "toggle-option" => {
+                            let pointer = format!("/{}", args[0].replace('.', "/"));
+                            let value = serde_json::json!(editor.config().deref())
+                                .pointer(&pointer)
+                                .unwrap()
+                                .clone();
+                            format!("{} ?{}", cmd.doc(), value)
+                        }
+                        _ => cmd.doc().to_string(),
+                    }
                 }
-                KeyTrie::Node(n) => &n.name,
-                KeyTrie::Sequence(_) => "[Multiple commands]",
+                KeyTrie::Node(n) => n.name.to_string(),
+                KeyTrie::Sequence(_) => "[Multiple commands]".to_string(),
             };
             match body.iter().position(|(_, d)| d == &desc) {
                 Some(pos) => {

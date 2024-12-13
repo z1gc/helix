@@ -472,6 +472,12 @@ pub struct SearchConfig {
     pub smart_case: bool,
     /// Whether the search should wrap after depleting the matches. Default to true.
     pub wrap_around: bool,
+    /// Forced case sensitive. Defaults to false, the smart_case is respected when false.
+    pub case_sensitive: bool,
+    /// Search whole word. Defaults to false.
+    pub whole_word: bool,
+    /// Use regex all the places. Defaults to true.
+    pub regex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,6 +497,7 @@ impl Default for StatusLineConfig {
         Self {
             left: vec![
                 E::Mode,
+                E::Window,
                 E::Spinner,
                 E::FileName,
                 E::ReadOnlyIndicator,
@@ -501,6 +508,7 @@ impl Default for StatusLineConfig {
                 E::Diagnostics,
                 E::Selections,
                 E::Register,
+                E::SearchConfig,
                 E::Position,
                 E::FileEncoding,
             ],
@@ -533,6 +541,9 @@ impl Default for ModeConfig {
 pub enum StatusLineElement {
     /// The editor mode (Normal, Insert, Visual/Selection)
     Mode,
+
+    /// Window Number
+    Window,
 
     /// The LSP activity spinner
     Spinner,
@@ -593,6 +604,9 @@ pub enum StatusLineElement {
 
     /// Indicator for selected register
     Register,
+
+    /// Indicator for the search config (sensetive or else), TODO: global
+    SearchConfig,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs
@@ -1008,6 +1022,9 @@ impl Default for SearchConfig {
         Self {
             wrap_around: true,
             smart_case: true,
+            case_sensitive: false,
+            whole_word: false,
+            regex: true,
         }
     }
 }
@@ -1424,6 +1441,13 @@ impl Editor {
             .file_event_handler
             .file_changed(new_path);
         Ok(())
+    }
+
+    // TODO: current_buffer().directory()
+    pub fn current_buffer_directory(&self) -> Option<PathBuf> {
+        doc!(self)
+            .path()
+            .and_then(|path| path.parent().map(|path| path.to_path_buf()))
     }
 
     pub fn set_doc_path(&mut self, doc_id: DocumentId, path: &Path) {
